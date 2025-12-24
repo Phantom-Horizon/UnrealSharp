@@ -192,6 +192,33 @@ void UCSHotReloadSubsystem::PerformHotReload(bool bShouldRecompile)
 	if (bShouldRecompile)
 	{
 		Progress.EnterProgressFrame(1, LOCTEXT("HotReload_Compiling", "Compiling Managed Code..."));
+
+		// 手动热重载模式：文件保存时仅记录变更，真正的增量更新与编译在这里统一执行。
+		if (!PendingFileChanges.IsEmpty())
+		{
+			for (const FCSPendingHotReloadChange& PendingChange : PendingFileChanges)
+			{
+				TArray<FCSHotReloadUtilities::FCSChangedFile> DirtiedFiles;
+				FCSHotReloadUtilities::CollectDirtiedFiles(PendingChange.ChangedFiles, DirtiedFiles);
+
+				if (DirtiedFiles.IsEmpty())
+				{
+					continue;
+				}
+
+				ExceptionMessage.Reset();
+				if (!FCSHotReloadUtilities::ApplyDirtiedFiles(PendingChange.ProjectName.ToString(), DirtiedFiles, ExceptionMessage))
+				{
+					CurrentHotReloadStatus = FailedToCompile;
+					FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("C# Reload Failed")));
+					return;
+				}
+			}
+
+			PendingFileChanges.Reset();
+		}
+
+		ExceptionMessage.Reset();
 		if (!FCSHotReloadUtilities::RecompileDirtyProjects(AssembliesSortedByDependencies, ExceptionMessage))
 		{
 			CurrentHotReloadStatus = FailedToCompile;
@@ -199,6 +226,7 @@ void UCSHotReloadSubsystem::PerformHotReload(bool bShouldRecompile)
 			return;
 		}
 	}
+
 	else
 	{
 		Progress.EnterProgressFrame(1, LOCTEXT("HotReload_Syncing", "Syncing Assemblies..."));
@@ -404,22 +432,14 @@ void UCSHotReloadSubsystem::OnStopPlayingPIE(bool IsSimulating)
 {
 	// Replicate UE behavior, which forces a garbage collection when exiting PIE.
 	UnrealSharpEditorModule->GetManagedEditorCallbacks().ForceManagedGC();
-	
-	if (GetDefault<UCSUnrealSharpEditorSettings>()->AutomaticHotReloading != Off)
-	{
-		PerformHotReload(true);
-	}
 }
 
 bool UCSHotReloadSubsystem::Tick(float DeltaTime)
 {
-	if (FCSHotReloadUtilities::ShouldHotReloadOnEditorFocus(this))
-	{
-		PerformHotReload(true);
-	}
-	
+	// 手动触发模式：不在 Tick 中自动编译/热重载。
 	return true;
 }
+
 
 void UCSHotReloadSubsystem::AddDirectoryToWatch(const FString& Directory, FName ProjectName)
 {
@@ -488,20 +508,21 @@ void UCSHotReloadSubsystem::HandleScriptFileChanges(const TArray<FFileChangeData
 	{
 		return;
 	}
-	
-	TArray<FCSHotReloadUtilities::FCSChangedFile> DirtiedFiles;
-	FCSHotReloadUtilities::CollectDirtiedFiles(CSharpFiles, DirtiedFiles);
-	
-	if (DirtiedFiles.IsEmpty())
+
+	// 仅记录变更：避免“保存文件/切换焦点”时频繁触发编译。
+	// 真正的增量更新与编译在用户手动触发（F5）时统一执行。
+	FCSPendingHotReloadChange* Existing = PendingFileChanges.FindByPredicate([&](const FCSPendingHotReloadChange& Change)
 	{
-		return;
+		return Change.ProjectName == ProjectName;
+	});
+
+	if (Existing)
+	{
+		Existing->ChangedFiles.Append(CSharpFiles);
 	}
-	
-	FString ExceptionMessage;
-	if (!FCSHotReloadUtilities::ApplyDirtiedFiles(ProjectName.ToString(), DirtiedFiles, ExceptionMessage))
+	else
 	{
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("C# Hot Reload Error")));
-		return;
+		PendingFileChanges.Add(FCSPendingHotReloadChange(ProjectName, CSharpFiles));
 	}
 	
 	UCSManagedAssembly* ModifiedAssembly = UCSManager::Get().FindOrLoadAssembly(ProjectName);
@@ -515,14 +536,7 @@ void UCSHotReloadSubsystem::HandleScriptFileChanges(const TArray<FFileChangeData
 	{
 		PendingModifiedAssemblies.Add(ModifiedAssembly);
 	}
-	
-	if (FCSHotReloadUtilities::ShouldDeferHotReloadRequest(ModifiedAssembly))
-	{
-		UE_LOGFMT(LogUnrealSharpEditor, Verbose, "Deferring hot reload request for assembly {0}.", *ModifiedAssembly->GetAssemblyName().ToString());
-		return;
-	}
-	
-	PerformHotReload(true);
 }
+
 
 #undef LOCTEXT_NAMESPACE

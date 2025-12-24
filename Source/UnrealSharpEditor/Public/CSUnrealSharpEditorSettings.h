@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Engine/DeveloperSettings.h"
@@ -52,7 +52,8 @@ public:
 	
 	// Whether Hot Reload should automatically start on script save, gaining Editor focus, or not at all.
 	UPROPERTY(EditDefaultsOnly, config, Category = "UnrealSharp | Hot Reload")
-	TEnumAsByte<EAutomaticHotReloadMethod> AutomaticHotReloading = OnScriptSave;
+	TEnumAsByte<EAutomaticHotReloadMethod> AutomaticHotReloading = Off;
+
 
 	// The build configuration to use when building the C# project in the editor.
 	UPROPERTY(EditDefaultsOnly, config, Category = "UnrealSharp | Hot Reload")

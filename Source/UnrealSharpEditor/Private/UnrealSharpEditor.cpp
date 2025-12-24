@@ -1,4 +1,4 @@
-﻿#include "UnrealSharpEditor.h"
+#include "UnrealSharpEditor.h"
 #include "AssetToolsModule.h"
 #include "CSUnrealSharpEditorCommands.h"
 #include "CSStyle.h"
@@ -95,10 +95,6 @@ void FUnrealSharpEditorModule::OnCompileManagedCode()
 	UCSHotReloadSubsystem::Get()->PerformHotReload(true);
 }
 
-void FUnrealSharpEditorModule::OnReloadAssemblyOnly()
-{
-	UCSHotReloadSubsystem::Get()->PerformHotReload(false);
-}
 
 void FUnrealSharpEditorModule::OnRegenerateSolution()
 {
@@ -321,8 +317,6 @@ TSharedRef<SWidget> FUnrealSharpEditorModule::GenerateUnrealSharpToolbar() const
 	MenuBuilder.AddMenuEntry(CSCommands.HotReload, NAME_None, TAttribute<FText>(), TAttribute<FText>(),
 	                         FSlateIcon(FAppStyle::Get().GetStyleSetName(), "LevelEditor.Recompile"));
 
-	MenuBuilder.AddMenuEntry(CSCommands.HotReloadAssemblyOnly, NAME_None, TAttribute<FText>(), TAttribute<FText>(),
-							 FSlateIcon(FAppStyle::Get().GetStyleSetName(), "LevelEditor.Recompile"));
 
 	MenuBuilder.EndSection();
 
@@ -409,10 +403,9 @@ void FUnrealSharpEditorModule::RegisterCommands()
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnCreateNewProject));
 	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().HotReload,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnCompileManagedCode));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().HotReloadAssemblyOnly,
-								   FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnReloadAssemblyOnly));
 	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().RegenerateSolution,
 	                               FExecuteAction::CreateRaw(this, &FUnrealSharpEditorModule::OnRegenerateSolution));
+
 	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().OpenSolution,
 	                               FExecuteAction::CreateRaw(this, &FUnrealSharpEditorModule::OnOpenSolution));
 	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().MergeManagedSlnAndNativeSln,

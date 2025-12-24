@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "CoreMinimal.h"
 #include "Modules/ModuleManager.h"
@@ -69,9 +69,9 @@ private:
 
     static void OnCreateNewProject();
     static void OnCompileManagedCode();
-    static void OnReloadAssemblyOnly();
     
     void OnRegenerateSolution();
+
     void OnOpenSolution();
     void OpenSolution();
     

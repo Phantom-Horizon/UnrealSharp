@@ -199,7 +199,18 @@ public static class IncrementalCompilationManager
 
         foreach (Project project in SolutionManager.UnrealSharpWorkspace.CurrentSolution.Projects)
         {
+            // Source generators/analyzers are build-time only and should not be part of the runtime load order.
+            if (!string.IsNullOrEmpty(project.AssemblyName) && project.AssemblyName.EndsWith(".Analyzers", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             assemblies.Add(GetAssemblyOutputPath(project));
+        }
+
+        if (assemblies.Count == 0)
+        {
+            return;
         }
 
         string outputDir = Path.GetDirectoryName(assemblies[0])!;
