@@ -40,6 +40,10 @@ public record UnrealProperty : UnrealType
     public readonly bool IsPartial = true;
     public readonly bool IsNullable;
     public readonly bool IsRequired;
+    
+    // PropertyHook metadata
+    public bool HasOnGetter;
+    public bool HasOnSetter;
 
     // Type and marshaling information
     public PropertyType PropertyType = PropertyType.Unknown;
@@ -108,6 +112,21 @@ public record UnrealProperty : UnrealType
     {
         UnrealStruct owningStruct = (UnrealStruct) outer!;
         UnrealProperty property = PropertyFactory.CreateProperty(symbol, outer!, syntaxNode);
+        
+        // Check for PropertyHook attribute
+        foreach (var attribute in symbol.GetAttributes())
+        {
+            if (attribute.AttributeClass?.Name == "PropertyHookAttribute")
+            {
+                if (attribute.ConstructorArguments.Length > 0)
+                {
+                    var flags = (int)(attribute.ConstructorArguments[0].Value ?? 0);
+                    property.HasOnGetter = (flags & 1) != 0; // PropertyHookFlags.OnGetter
+                    property.HasOnSetter = (flags & 2) != 0; // PropertyHookFlags.OnSetter
+                }
+            }
+        }
+        
         owningStruct.Properties.List.Add(property);
         return property;
     }
@@ -196,6 +215,20 @@ public record UnrealProperty : UnrealType
         ExportBackingVariables(builder);
         builder.AppendLine();
         
+        // Export partial hook method declarations
+        if (HasOnGetter)
+        {
+            builder.AppendLine($"private partial {ManagedType} On{SourceName}Get({ManagedType} value);");
+        }
+        if (HasOnSetter)
+        {
+            builder.AppendLine($"private partial void On{SourceName}Set({ManagedType} value);");
+        }
+        if (HasOnGetter || HasOnSetter)
+        {
+            builder.AppendLine();
+        }
+        
         if (this.HasCustomGetterOrSetter())
         {
             if (SetterMethod.HasCustomPropertyMethod())
@@ -235,14 +268,37 @@ public record UnrealProperty : UnrealType
 
     protected virtual void ExportGetter(GeneratorStringBuilder builder)
     {
-        builder.Append(" => ");
-        ExportFromNative(builder, SourceGenUtilities.NativeObject);
+        if (HasOnGetter)
+        {
+            builder.AppendLine();
+            builder.OpenBrace();
+            builder.Append($"{ManagedType} __value = ");
+            ExportFromNative(builder, SourceGenUtilities.NativeObject);
+            builder.AppendLine($"return On{SourceName}Get(__value);");
+            builder.CloseBrace();
+        }
+        else
+        {
+            builder.Append(" => ");
+            ExportFromNative(builder, SourceGenUtilities.NativeObject);
+        }
     }
     
     protected virtual void ExportSetter(GeneratorStringBuilder builder)
     {
-        builder.Append(" => ");
-        ExportToNative(builder, SourceGenUtilities.NativeObject, SourceGenUtilities.ValueParam);
+        if (HasOnSetter)
+        {
+            builder.AppendLine();
+            builder.OpenBrace();
+            ExportToNative(builder, SourceGenUtilities.NativeObject, SourceGenUtilities.ValueParam);
+            builder.AppendLine($"On{SourceName}Set({SourceGenUtilities.ValueParam});");
+            builder.CloseBrace();
+        }
+        else
+        {
+            builder.Append(" => ");
+            ExportToNative(builder, SourceGenUtilities.NativeObject, SourceGenUtilities.ValueParam);
+        }
     }
 
     public override void ExportBackingVariables(GeneratorStringBuilder builder)
