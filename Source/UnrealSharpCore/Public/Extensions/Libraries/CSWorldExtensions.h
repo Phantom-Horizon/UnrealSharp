@@ -27,7 +27,7 @@ UENUM(BlueprintType)
 enum ECSWorldType : int
 {
 	/** An untyped world, in most cases this will be the vestigial worlds of streamed in sub-levels */
-	None = EWorldType::None,
+	CSWorldType_None = EWorldType::None,
 
 	/** The game world */
 	Game = EWorldType::Game,
