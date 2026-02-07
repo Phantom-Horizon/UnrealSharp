@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
@@ -44,6 +44,10 @@ public record UnrealProperty : UnrealType
     // PropertyHook metadata
     public bool HasOnGetter;
     public bool HasOnSetter;
+    
+    // PropertyHook generated functions (for JSON serialization)
+    private UnrealPropertyHookFunction? _hookGetterFunction;
+    private UnrealPropertyHookFunction? _hookSetterFunction;
 
     // Type and marshaling information
     public PropertyType PropertyType = PropertyType.Unknown;
@@ -123,6 +127,9 @@ public record UnrealProperty : UnrealType
                     var flags = (int)(attribute.ConstructorArguments[0].Value ?? 0);
                     property.HasOnGetter = (flags & 1) != 0; // PropertyHookFlags.OnGetter
                     property.HasOnSetter = (flags & 2) != 0; // PropertyHookFlags.OnSetter
+                    
+                    // Create hook functions for JSON serialization
+                    property.CreateHookFunctions();
                 }
             }
         }
@@ -209,25 +216,33 @@ public record UnrealProperty : UnrealType
         UnrealProperty property = (UnrealProperty)topType;
         property.AddMetaData("Category", (string)category.Value!);
     }
+    
+    /// <summary>
+    /// Creates hook functions for PropertyHook attributes.
+    /// These functions are used by UE to access the property through C# code,
+    /// which triggers the hook methods.
+    /// Note: We always create both getter and setter functions because C++ side
+    /// requires both to be present (TCSGetterSetterProperty).
+    /// </summary>
+    public void CreateHookFunctions()
+    {
+        // Always create both getter and setter when any hook is enabled
+        // because C++ TCSGetterSetterProperty requires both functions
+        if (HasOnGetter || HasOnSetter)
+        {
+            _hookGetterFunction = new UnrealPropertyHookFunction(this, isGetter: true);
+            _hookSetterFunction = new UnrealPropertyHookFunction(this, isGetter: false);
+        }
+    }
 
     public override void ExportType(GeneratorStringBuilder builder, SourceProductionContext spc)
     {
         ExportBackingVariables(builder);
         builder.AppendLine();
         
-        // Export partial hook method declarations
-        if (HasOnGetter)
-        {
-            builder.AppendLine($"private partial {ManagedType} On{SourceName}Get({ManagedType} value);");
-        }
-        if (HasOnSetter)
-        {
-            builder.AppendLine($"private partial void On{SourceName}Set({ManagedType} value);");
-        }
-        if (HasOnGetter || HasOnSetter)
-        {
-            builder.AppendLine();
-        }
+        // Note: PropertyHook does not generate partial method declarations
+        // User should implement: private void On{PropertyName}Set({Type} value)
+        // or: private {Type} On{PropertyName}Get({Type} value)
         
         if (this.HasCustomGetterOrSetter())
         {
@@ -264,6 +279,10 @@ public record UnrealProperty : UnrealType
         }
         
         builder.CloseBrace();
+        
+        // Export PropertyHook functions
+        _hookGetterFunction?.ExportType(builder, spc);
+        _hookSetterFunction?.ExportType(builder, spc);
     }
 
     protected virtual void ExportGetter(GeneratorStringBuilder builder)
@@ -393,8 +412,19 @@ public record UnrealProperty : UnrealType
         jsonWriter.TrySetJsonString("ReplicatedUsing", ReplicatedUsing);
         jsonWriter.TrySetJsonEnum("LifetimeCondition", LifetimeCondition);
         
+        // Output custom getter/setter methods
         SetGetterSetterToJson(jsonWriter, "GetterMethod", GetterMethod);
         SetGetterSetterToJson(jsonWriter, "SetterMethod", SetterMethod);
+        
+        // Output PropertyHook functions (if no custom getter/setter)
+        if (!GetterMethod.HasCustomPropertyMethod() && _hookGetterFunction != null)
+        {
+            SetHookFunctionToJson(jsonWriter, "GetterMethod", _hookGetterFunction);
+        }
+        if (!SetterMethod.HasCustomPropertyMethod() && _hookSetterFunction != null)
+        {
+            SetHookFunctionToJson(jsonWriter, "SetterMethod", _hookSetterFunction);
+        }
     }
     
     private void SetGetterSetterToJson(JsonWriter jsonWriter, string key, PropertyMethod? method)
@@ -407,6 +437,14 @@ public record UnrealProperty : UnrealType
         jsonWriter.WritePropertyName(key);
         jsonWriter.WriteStartObject();
         method.Value.CustomPropertyMethod!.PopulateJsonObject(jsonWriter);
+        jsonWriter.WriteEndObject();
+    }
+    
+    private void SetHookFunctionToJson(JsonWriter jsonWriter, string key, UnrealPropertyHookFunction hookFunction)
+    {
+        jsonWriter.WritePropertyName(key);
+        jsonWriter.WriteStartObject();
+        hookFunction.PopulateJsonObject(jsonWriter);
         jsonWriter.WriteEndObject();
     }
 }
