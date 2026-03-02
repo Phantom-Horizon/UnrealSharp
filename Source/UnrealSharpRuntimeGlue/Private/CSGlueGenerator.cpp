@@ -3,9 +3,15 @@
 #include "Logging/StructuredLog.h"
 #include "CSProcUtilities.h"
 
-void UCSGlueGenerator::SaveRuntimeGlue(const FCSScriptBuilder& ScriptBuilder, const FString& FileName, const FString& Suffix)
+FString UCSGlueGenerator::GetPluginGlueFolder(const FString& PluginName)
 {
-	const FString Path = FPaths::Combine(UCSProcUtilities::GetProjectGlueFolderPath(), FileName + Suffix);
+	return UCSProcUtilities::GetPluginGlueFolderPath(PluginName);
+}
+
+void UCSGlueGenerator::SaveRuntimeGlue(FCSScriptBuilder& ScriptBuilder, const FString& FileName, const FString& Suffix)
+{
+	FString FullFileName = FileName + Suffix;
+	FString Path = FPaths::Combine(FUnrealSharpRuntimeGlueModule::GetGlueFolder(), FullFileName);
 
 	FString CurrentRuntimeGlue;
 	FFileHelper::LoadFileToString(CurrentRuntimeGlue, *Path);

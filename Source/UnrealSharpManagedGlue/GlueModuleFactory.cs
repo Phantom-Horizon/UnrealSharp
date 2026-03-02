@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using EpicGames.UHT.Utils;
+using EpicGames.UHT.Types;
 using UnrealSharpManagedGlue.Utilities;
 
 namespace UnrealSharpManagedGlue;
@@ -16,65 +16,19 @@ public static class GlueModuleFactory
     {
         LoadModuleDependencies();
         
-        Dictionary<string, ProjectDirInfo> mergedModules = new();
-        
-        bool hasProjectGlue = false;
-        foreach (ProjectDirInfo pluginDir in PluginUtilities.PluginInfo.Values)
+        bool anyChanges = false;
+        foreach (ModuleInfo moduleInfo in ModuleUtilities.PackageToModuleInfo.Values)
         {
-            if (pluginDir.IsPartOfEngine)
+            if (!moduleInfo.Module.ShouldExportPackage() || moduleInfo.IsPartOfEngine)
             {
                 continue;
             }
             
-            hasProjectGlue |= pluginDir.IsUProject;
-
-            if (!mergedModules.TryGetValue(pluginDir.ProjectRoot, out ProjectDirInfo foundProjectDirInfo))
-            {
-                mergedModules[pluginDir.ProjectRoot] = pluginDir;
-            }
-            else
-            {
-                if (pluginDir.Dependencies == null || pluginDir.Dependencies.Count > 0)
-                {
-                    continue;
-                }
-                
-                if (foundProjectDirInfo.Dependencies == null)
-                {
-                    foundProjectDirInfo.Dependencies = new HashSet<string>();
-                }
-                
-                foreach (string dependency in pluginDir.Dependencies)
-                {
-                    foundProjectDirInfo.Dependencies.Add(dependency);
-                }
-                
-                mergedModules[pluginDir.ProjectRoot] = foundProjectDirInfo;
-            }
-        }
-        
-        bool anyChanges = false;
-        foreach (ProjectDirInfo pluginDir in mergedModules.Values)
-        {
-            CreateOrUpdateGlueModule(pluginDir.GlueCsProjPath, pluginDir.GlueProjectName, pluginDir.Dependencies, pluginDir.ProjectRoot, out bool createdNewModule);
-            anyChanges |= createdNewModule;
-        }
-        
-        // If the user doesn't have any C++ in their project, we need to create a Glue module for the project manually.
-        // Used for runtime generated code such as GameplayTags.
-        if (!hasProjectGlue)
-        {
-            UhtSession session = GeneratorStatics.Factory.Session;
-            string projectRoot = session.ProjectDirectory!;
-            string baseName = Path.GetFileNameWithoutExtension(session.ProjectFile!);
-            string projectName = baseName + ".Glue";
-            string csprojPath = Path.Join(projectRoot, "Script", projectName, projectName + ".csproj");
-
-            CreateOrUpdateGlueModule(csprojPath, projectName, null, projectRoot, out bool createdNewModule);
+            CreateOrUpdateGlueModule(moduleInfo.CsProjPath, moduleInfo.ProjectName, moduleInfo.Dependencies, moduleInfo.ModuleRoot, moduleInfo.Module, out bool createdNewModule);
             anyChanges |= createdNewModule;
         }
 
-        if (anyChanges)
+        if (anyChanges || !File.Exists(GeneratorStatics.ManagedSolutionPath))
         {
             USharpBuildToolUtilities.InvokeUSharpBuildTool("GenerateSolution");
         }
@@ -92,13 +46,18 @@ public static class GlueModuleFactory
         }
     }
 
-    private static void CreateOrUpdateGlueModule(string csprojPath, string projectName, IEnumerable<string>? dependencyPaths, string projectRoot, out bool createdNewModule)
+    private static void CreateOrUpdateGlueModule(string csprojPath, 
+        string projectName, 
+        IEnumerable<string>? dependencyPaths, 
+        string projectRoot, UhtPackage? package, 
+        out bool createdNewModule)
     {
         createdNewModule = false;
         
         if (!File.Exists(csprojPath))
         {
             string projectDirectory = Path.GetDirectoryName(csprojPath)!;
+            bool isEditorOnly = package?.IsEditorOnly() ?? false;
             List<KeyValuePair<string, string>> arguments = new List<KeyValuePair<string, string>>
             {
                 new("NewProjectName", projectName),
@@ -106,7 +65,9 @@ public static class GlueModuleFactory
                 new("SkipIncludeProjectGlue", "true"),
                 new("SkipSolutionGeneration", "true"),
                 new("SkipUSharpProjSetup", "true"),
-                new("ProjectRoot", projectRoot)
+                new("ProjectRoot", projectRoot),
+                new("EditorOnly", isEditorOnly.ToString()),
+                new("IsCollectible", "false"),
             };
             
             if (!USharpBuildToolUtilities.InvokeUSharpBuildTool("GenerateProject", arguments))

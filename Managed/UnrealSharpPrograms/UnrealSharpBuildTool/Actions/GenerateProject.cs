@@ -26,8 +26,8 @@ public class GenerateProject : BuildToolAction
 
     public override bool RunAction()
     {
-        string folder = Program.TryGetArgument("NewProjectFolder");
-        _projectRoot = Program.TryGetArgument("ProjectRoot");
+        string folder = Program.GetArgument("NewProjectFolder");
+        _projectRoot = Program.GetArgument("ProjectRoot");
         
         if (!ContainsUPluginOrUProjectFile(_projectRoot))
         {
@@ -39,44 +39,27 @@ public class GenerateProject : BuildToolAction
             folder = Path.Combine(folder, "Script");
         }
 
-        string projectName = Program.TryGetArgument("NewProjectName");
+        string projectName = Program.GetArgument("NewProjectName");
         string csProjFileName = $"{projectName}.csproj";
-
-        if (!Directory.Exists(folder))
-        {
-            Directory.CreateDirectory(folder);
-        }
 
         _projectFolder = Path.Combine(folder, projectName);
         _projectPath = Path.Combine(_projectFolder, csProjFileName);
-
-        string version = Program.GetVersion();
-        using BuildToolProcess generateProjectProcess = new BuildToolProcess();
-
-        // Create a class library.
-        generateProjectProcess.StartInfo.ArgumentList.Add("new");
-        generateProjectProcess.StartInfo.ArgumentList.Add("classlib");
-
-        // Assign project name to the class library.
-        generateProjectProcess.StartInfo.ArgumentList.Add("-n");
-        generateProjectProcess.StartInfo.ArgumentList.Add(projectName);
-
-        // Set the target framework to the current version.
-        generateProjectProcess.StartInfo.ArgumentList.Add("-f");
-        generateProjectProcess.StartInfo.ArgumentList.Add(version);
-
-        generateProjectProcess.StartInfo.WorkingDirectory = folder;
-
-        if (!generateProjectProcess.StartBuildToolProcess())
+        
+        Dictionary<string, string> templateValues = new Dictionary<string, string>
         {
-            return false;
-        }
+            { "DOTNET_VERSION", Program.GetVersion() }
+        };
+        
+        TemplateUtilities.WriteTemplateToFile("Csproj", projectName, "csproj", _projectFolder, templateValues);
 
-        // dotnet new class lib generates a file named Class1, remove it.
-        string myClassFile = Path.Combine(_projectFolder, "Class1.cs");
-        if (File.Exists(myClassFile))
+        if (Program.GetArgumentBool("CreateModuleClass"))
         {
-            File.Delete(myClassFile);
+            Dictionary<string, string> moduleTemplateValues = new Dictionary<string, string>
+            {
+                { "MODULE_NAME", projectName }
+            };
+            
+            TemplateUtilities.WriteTemplateToFile("Module", projectName, "cs", _projectFolder, moduleTemplateValues);
         }
         
         ModifyModuleFile();
@@ -110,18 +93,12 @@ public class GenerateProject : BuildToolAction
                 newItemGroup = csprojDocument.CreateElement("ItemGroup");
                 csprojDocument.DocumentElement!.AppendChild(newItemGroup);
             }
-
-            if (!Program.HasArgument("SkipIncludeProjectGlue"))
-            {
-                AppendGeneratedCode(csprojDocument, newItemGroup);
-            }
             
-            if (Program.HasArgument("EditorOnly"))
-            {
-                XmlElement newPropertyGroup = csprojDocument.MakePropertyGroup(csprojDocument.DocumentElement!);
-                XmlElement outputType = csprojDocument.GetOrCreateChild(newPropertyGroup, "IsPublishable");
-                outputType.InnerText = "false";
-            }
+            bool isEditorOnly = Program.GetArgumentBool("EditorOnly");
+            bool isCollectible = Program.GetArgumentBool("IsCollectible");
+
+            csprojDocument.SetProjectProperty("IsPublishable", (!isEditorOnly).ToString());
+            csprojDocument.SetProjectProperty("IsCollectible", isCollectible.ToString());
 
             string unrealSharpPluginPath = Program.GetUnrealSharpSharedProps();
             string relativeUnrealSharpPath = GetRelativePath(_projectFolder, unrealSharpPluginPath);
@@ -138,14 +115,6 @@ public class GenerateProject : BuildToolAction
         {
             throw new InvalidOperationException($"An error occurred while updating the .csproj file: {ex.Message}", ex);
         }
-    }
-
-    private void AppendGeneratedCode(XmlDocument doc, XmlElement itemGroup)
-    {
-        string providedGlueName = Program.TryGetArgument("GlueProjectName");
-        string scriptFolder = string.IsNullOrEmpty(_projectRoot) ? Program.GetScriptFolder() : Path.Combine(_projectRoot, "Script");
-        string generatedGluePath = Path.Combine(scriptFolder, providedGlueName, $"{providedGlueName}.csproj");
-        AddDependency(doc, itemGroup, generatedGluePath);
     }
 
     private void AddDependency(XmlDocument doc, XmlElement itemGroup, string dependency)

@@ -66,7 +66,11 @@ public static class StructExporter
         if (isBlittable || isManualExport)
         {
             attributeBuilder.AddIsBlittableAttribute();
-            attributeBuilder.AddStructLayoutAttribute(System.Runtime.InteropServices.LayoutKind.Sequential);
+            
+            if (!structObj.HasAttribute("UserSpecifiedLayout"))
+            {
+                attributeBuilder.AddStructLayoutAttribute(System.Runtime.InteropServices.LayoutKind.Sequential);
+            }
         }
         
         attributeBuilder.AddGeneratedTypeAttribute(structObj);
@@ -106,6 +110,11 @@ public static class StructExporter
             List<string> reservedNames = GetReservedNames(exportedProperties);
 
             ExportStructProperties(structObj, stringBuilder, exportedProperties, isBlittable, reservedNames, isReadOnly, useProperties);
+        }
+
+        if (!isManualExport && structObj.CanSupportConstructor(exportedProperties))
+        {
+            ExportConstructor(structObj, structName, stringBuilder, exportedProperties);
         }
 
         if (isBlittable)
@@ -164,6 +173,33 @@ public static class StructExporter
         
         stringBuilder.EndGlueFile(structObj);
         FileExporter.SaveGlueToDisk(structObj, stringBuilder);
+    }
+
+    public static void ExportConstructor(UhtStruct structObj, string structName, GeneratorStringBuilder stringBuilder, List<UhtProperty> exportedProperties)
+    {
+        stringBuilder.AppendLine();
+        stringBuilder.Append($"public {structName}(");
+        for (int i = 0; i < exportedProperties.Count; i++)
+        {
+            UhtProperty property = exportedProperties[i];
+            string scriptName = property.GetPropertyName();
+            PropertyTranslator translator = PropertyTranslatorManager.GetTranslator(property)!;
+
+            translator.ExportConstructorParameter(stringBuilder, property, scriptName);
+            if (i < exportedProperties.Count - 1)
+            {
+                stringBuilder.Append(", ");
+            }
+        }
+        stringBuilder.Append(")");
+        stringBuilder.OpenBrace();
+        for (int i = 0; i < exportedProperties.Count; i++)
+        {
+            UhtProperty property = exportedProperties[i];
+            string scriptName = property.GetPropertyName();
+            stringBuilder.AppendLine($"this.{scriptName} = {scriptName};");
+        }
+        stringBuilder.CloseBrace();
     }
 
     public static void ExportStructEquality(string structName, GeneratorStringBuilder stringBuilder, List<UhtProperty> exportedProperties)
@@ -336,20 +372,23 @@ public static class StructExporter
         stringBuilder.AppendLine($"return new {structName}");
         stringBuilder.OpenBrace();
         stringBuilder.AppendLine();
+        
         for (int i = 0; i < exportedProperties.Count; i++)
         {
             UhtProperty property = exportedProperties[i];
-            string scriptName = property.GetPropertyName();
             PropertyTranslator translator = property.GetTranslator()!;
 
             translator.ExportPropertyArithmetic(stringBuilder, property, ArithmeticKind.Divide);
 
-            if (i < exportedProperties.Count - 1)
+            if (i >= exportedProperties.Count - 1)
             {
-                stringBuilder.Append(", ");
-                stringBuilder.AppendLine();
+                continue;
             }
+            
+            stringBuilder.Append(", ");
+            stringBuilder.AppendLine();
         }
+        
         stringBuilder.UnIndent();
         stringBuilder.AppendLine("};");
         stringBuilder.CloseBrace();

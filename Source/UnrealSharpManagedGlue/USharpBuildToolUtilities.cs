@@ -19,7 +19,7 @@ public static class USharpBuildToolUtilities
             GeneratorStatics.Factory.Session.EngineDirectory!,
             arguments);
     }
-    
+
     public static void CompileUSharpBuildTool()
     {
         Console.WriteLine("Compiling USharpBuildTool...");

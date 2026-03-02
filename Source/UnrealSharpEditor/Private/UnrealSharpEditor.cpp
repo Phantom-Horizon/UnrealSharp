@@ -1,6 +1,6 @@
 ﻿#include "UnrealSharpEditor.h"
 #include "AssetToolsModule.h"
-#include "CSUnrealSharpEditorCommands.h"
+#include "CSEditorCommands.h"
 #include "CSStyle.h"
 #include "DesktopPlatformModule.h"
 #include "IPluginBrowser.h"
@@ -8,7 +8,6 @@
 #include "LevelEditor.h"
 #include "SourceCodeNavigation.h"
 #include "SubobjectDataSubsystem.h"
-#include "UnrealSharpRuntimeGlue.h"
 #include "AssetActions/CSAssetTypeAction_CSBlueprint.h"
 #include "Features/IPluginsEditorFeature.h"
 #include "CSManager.h"
@@ -25,7 +24,7 @@
 #include "Widgets/Notifications/SNotificationList.h"
 #include "UnrealSharpUtils.h"
 #include "HotReload/CSHotReloadSubsystem.h"
-#include "Utilities/CSTemplateUtilities.h"
+#include "Containers/Set.h"
 
 #define LOCTEXT_NAMESPACE "FUnrealSharpEditorModule"
 
@@ -68,9 +67,11 @@ void FUnrealSharpEditorModule::StartupModule()
 	RegisterCommands();
 	RegisterToolbar();
     RegisterPluginTemplates();
-
-	UCSManager& CSharpManager = UCSManager::Get();
-	CSharpManager.LoadPluginAssemblyByName(TEXT("UnrealSharp.Editor"), false);
+	
+	UCSManager::Get().AddOrExecuteOnManagerInitialized(UCSManager::FCSManagerInitializedEvent::FDelegate::CreateLambda([this](UCSManager& Manager)
+	{
+		Manager.LoadPluginAssemblyByName("UnrealSharp.Editor");
+	}));
 }
 
 void FUnrealSharpEditorModule::ShutdownModule()
@@ -137,47 +138,283 @@ void FUnrealSharpEditorModule::OnMergeManagedSlnAndNativeSln()
 	TArray<FString> NativeSlnFileLines;
 	FFileHelper::LoadFileToStringArray(NativeSlnFileLines, *NativeSolutionPath);
 
-	int32 LastEndProjectIdx = 0;
+	TArray<FString> ManagedSlnFileLines;
+	FFileHelper::LoadFileToStringArray(ManagedSlnFileLines, *ManagedSolutionPath);
 
+	auto Trimmed = [](const FString& InLine)
+	{
+		return InLine.TrimStartAndEnd();
+	};
+
+	auto FindSectionRange = [&Trimmed](const TArray<FString>& Lines, const FString& SectionName, int32& OutStart, int32& OutEnd)
+	{
+		OutStart = INDEX_NONE;
+		OutEnd = INDEX_NONE;
+
+		const FString SectionPrefix = FString::Printf(TEXT("GlobalSection(%s)"), *SectionName);
+		for (int32 idx = 0; idx < Lines.Num(); ++idx)
+		{
+			const FString Line = Trimmed(Lines[idx]);
+			if (!Line.StartsWith(SectionPrefix))
+			{
+				continue;
+			}
+
+			OutStart = idx;
+			for (int32 sectionIdx = idx + 1; sectionIdx < Lines.Num(); ++sectionIdx)
+			{
+				if (Trimmed(Lines[sectionIdx]) == TEXT("EndGlobalSection"))
+				{
+					OutEnd = sectionIdx;
+					return true;
+				}
+			}
+
+			return false;
+		}
+
+		return false;
+	};
+
+	auto ExtractQuotedParts = [](const FString& Line, TArray<FString>& OutParts)
+	{
+		OutParts.Reset();
+		bool bInQuote = false;
+		int32 StartIdx = INDEX_NONE;
+
+		for (int32 idx = 0; idx < Line.Len(); ++idx)
+		{
+			if (Line[idx] != TEXT('"'))
+			{
+				continue;
+			}
+
+			if (!bInQuote)
+			{
+				bInQuote = true;
+				StartIdx = idx + 1;
+			}
+			else
+			{
+				OutParts.Add(Line.Mid(StartIdx, idx - StartIdx));
+				bInQuote = false;
+				StartIdx = INDEX_NONE;
+			}
+		}
+
+		return OutParts.Num() >= 4;
+	};
+
+	auto ToWindowsSlashes = [](FString InPath)
+	{
+		InPath.ReplaceInline(TEXT("/"), TEXT("\\"));
+		return InPath;
+	};
+
+	struct FSlnProjectBlock
+	{
+		TArray<FString> Lines;
+		FString ProjectGuid;
+		bool bIsCSharpProject = false;
+	};
+
+	TArray<FSlnProjectBlock> ManagedProjectBlocks;
+	TArray<FString> ManagedNestedMappings;
+	TSet<FString> ManagedCSharpProjectGuids;
+
+	const FString ManagedSolutionDirectory = FPaths::GetPath(ManagedSolutionPath);
+	const FString ProjectRootDirectory = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	for (int32 idx = 0; idx < ManagedSlnFileLines.Num(); ++idx)
+	{
+		const FString Line = Trimmed(ManagedSlnFileLines[idx]);
+		if (!Line.StartsWith(TEXT("Project(")))
+		{
+			continue;
+		}
+
+		int32 EndProjectIdx = INDEX_NONE;
+		for (int32 searchIdx = idx + 1; searchIdx < ManagedSlnFileLines.Num(); ++searchIdx)
+		{
+			if (Trimmed(ManagedSlnFileLines[searchIdx]) == TEXT("EndProject"))
+			{
+				EndProjectIdx = searchIdx;
+				break;
+			}
+		}
+
+		if (EndProjectIdx == INDEX_NONE)
+		{
+			continue;
+		}
+
+		FSlnProjectBlock Block;
+		for (int32 blockIdx = idx; blockIdx <= EndProjectIdx; ++blockIdx)
+		{
+			Block.Lines.Add(ManagedSlnFileLines[blockIdx]);
+		}
+
+		TArray<FString> QuotedParts;
+		if (ExtractQuotedParts(Block.Lines[0], QuotedParts))
+		{
+			FString RelativeProjectPath = QuotedParts[2];
+			const bool bContainsCsProj = RelativeProjectPath.EndsWith(TEXT(".csproj"), ESearchCase::IgnoreCase);
+
+			if (bContainsCsProj)
+			{
+				FString AbsoluteProjectPath = FPaths::ConvertRelativePathToFull(ManagedSolutionDirectory / RelativeProjectPath);
+				FString PathRelativeToProject = AbsoluteProjectPath;
+				FPaths::MakePathRelativeTo(PathRelativeToProject, *ProjectRootDirectory);
+				RelativeProjectPath = ToWindowsSlashes(PathRelativeToProject);
+				Block.bIsCSharpProject = true;
+			}
+
+			Block.ProjectGuid = QuotedParts[3];
+			QuotedParts[2] = RelativeProjectPath;
+			Block.Lines[0] = FString::Printf(TEXT("Project(\"%s\") = \"%s\", \"%s\", \"%s\""),
+				*QuotedParts[0], *QuotedParts[1], *QuotedParts[2], *QuotedParts[3]);
+
+			if (Block.bIsCSharpProject)
+			{
+				ManagedCSharpProjectGuids.Add(Block.ProjectGuid);
+			}
+		}
+
+		ManagedProjectBlocks.Add(MoveTemp(Block));
+		idx = EndProjectIdx;
+	}
+
+	int32 ManagedNestedStartIdx = INDEX_NONE;
+	int32 ManagedNestedEndIdx = INDEX_NONE;
+	if (FindSectionRange(ManagedSlnFileLines, TEXT("NestedProjects"), ManagedNestedStartIdx, ManagedNestedEndIdx))
+	{
+		for (int32 idx = ManagedNestedStartIdx + 1; idx < ManagedNestedEndIdx; ++idx)
+		{
+			const FString Line = Trimmed(ManagedSlnFileLines[idx]);
+			if (!Line.IsEmpty())
+			{
+				ManagedNestedMappings.Add(Line);
+			}
+		}
+	}
+
+	int32 LastEndProjectIdx = INDEX_NONE;
 	for (int32 idx = 0; idx < NativeSlnFileLines.Num(); ++idx)
 	{
-		FString Line = NativeSlnFileLines[idx];
-		Line.ReplaceInline(TEXT("\n"), TEXT(""));
-		if (Line == TEXT("EndProject"))
+		if (Trimmed(NativeSlnFileLines[idx]) == TEXT("EndProject"))
 		{
 			LastEndProjectIdx = idx;
 		}
 	}
 
-	TArray<FString> ManagedSlnFileLines;
-	FFileHelper::LoadFileToStringArray(ManagedSlnFileLines, *ManagedSolutionPath);
-
-	TArray<FString> ManagedProjectLines;
-
-	for (int32 idx = 0; idx < ManagedSlnFileLines.Num(); ++idx)
+	if (LastEndProjectIdx == INDEX_NONE)
 	{
-		FString Line = ManagedSlnFileLines[idx];
-		Line.ReplaceInline(TEXT("\n"), TEXT(""));
-		if (Line.StartsWith(TEXT("Project(\"{")) || Line.StartsWith(TEXT("EndProject")))
+		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(TEXT("Failed to locate native solution project section.")));
+		return;
+	}
+
+	int32 InsertProjectAt = LastEndProjectIdx + 1;
+	for (const FSlnProjectBlock& Block : ManagedProjectBlocks)
+	{
+		for (const FString& BlockLine : Block.Lines)
 		{
-			ManagedProjectLines.Add(Line);
+			NativeSlnFileLines.Insert(BlockLine, InsertProjectAt++);
 		}
 	}
 
-	for (int32 idx = 0; idx < ManagedProjectLines.Num(); ++idx)
+	TArray<FString> NativeSolutionConfigs;
+	int32 NativeSolutionConfigStartIdx = INDEX_NONE;
+	int32 NativeSolutionConfigEndIdx = INDEX_NONE;
+	if (FindSectionRange(NativeSlnFileLines, TEXT("SolutionConfigurationPlatforms"), NativeSolutionConfigStartIdx, NativeSolutionConfigEndIdx))
 	{
-		FString Line = ManagedProjectLines[idx];
-		if (Line.StartsWith(TEXT("Project(\"{")) && Line.Contains(TEXT(".csproj")))
+		for (int32 idx = NativeSolutionConfigStartIdx + 1; idx < NativeSolutionConfigEndIdx; ++idx)
 		{
-			TArray<FString> ProjectStrParts;
-			Line.ParseIntoArray(ProjectStrParts, TEXT(", "));
-			if(ProjectStrParts.Num() == 3 && ProjectStrParts[1].Contains(TEXT(".csproj")))
+			const FString Line = Trimmed(NativeSlnFileLines[idx]);
+			if (Line.IsEmpty())
 			{
-				ProjectStrParts[1] = FString("\"Script\\") + ProjectStrParts[1].Mid(1);
-				Line = FString::Join(ProjectStrParts, TEXT(", "));
+				continue;
+			}
+
+			FString LeftSide;
+			FString RightSide;
+			if (Line.Split(TEXT("="), &LeftSide, &RightSide))
+			{
+				NativeSolutionConfigs.Add(LeftSide.TrimStartAndEnd());
 			}
 		}
-		NativeSlnFileLines.Insert(Line, LastEndProjectIdx + 1 + idx);
+	}
+
+	int32 NativeProjectConfigStartIdx = INDEX_NONE;
+	int32 NativeProjectConfigEndIdx = INDEX_NONE;
+	if (FindSectionRange(NativeSlnFileLines, TEXT("ProjectConfigurationPlatforms"), NativeProjectConfigStartIdx, NativeProjectConfigEndIdx))
+	{
+		TSet<FString> ExistingProjectConfigLines;
+		for (int32 idx = NativeProjectConfigStartIdx + 1; idx < NativeProjectConfigEndIdx; ++idx)
+		{
+			ExistingProjectConfigLines.Add(Trimmed(NativeSlnFileLines[idx]));
+		}
+
+		TArray<FString> ProjectConfigLinesToInsert;
+		for (const FString& ManagedGuid : ManagedCSharpProjectGuids)
+		{
+			for (const FString& SolutionConfig : NativeSolutionConfigs)
+			{
+				const FString ActiveCfgLine = FString::Printf(TEXT("%s.%s.ActiveCfg = Development|Any CPU"), *ManagedGuid, *SolutionConfig);
+				const FString BuildCfgLine = FString::Printf(TEXT("%s.%s.Build.0 = Development|Any CPU"), *ManagedGuid, *SolutionConfig);
+
+				if (!ExistingProjectConfigLines.Contains(ActiveCfgLine))
+				{
+					ProjectConfigLinesToInsert.Add(FString::Printf(TEXT("\t\t%s"), *ActiveCfgLine));
+					ExistingProjectConfigLines.Add(ActiveCfgLine);
+				}
+
+				if (!ExistingProjectConfigLines.Contains(BuildCfgLine))
+				{
+					ProjectConfigLinesToInsert.Add(FString::Printf(TEXT("\t\t%s"), *BuildCfgLine));
+					ExistingProjectConfigLines.Add(BuildCfgLine);
+				}
+			}
+		}
+
+		if (!ProjectConfigLinesToInsert.IsEmpty())
+		{
+			int32 InsertConfigAt = NativeProjectConfigEndIdx;
+			for (const FString& ConfigLine : ProjectConfigLinesToInsert)
+			{
+				NativeSlnFileLines.Insert(ConfigLine, InsertConfigAt++);
+			}
+		}
+	}
+
+	int32 NativeNestedStartIdx = INDEX_NONE;
+	int32 NativeNestedEndIdx = INDEX_NONE;
+	if (FindSectionRange(NativeSlnFileLines, TEXT("NestedProjects"), NativeNestedStartIdx, NativeNestedEndIdx))
+	{
+		TSet<FString> ExistingNestedMappings;
+		for (int32 idx = NativeNestedStartIdx + 1; idx < NativeNestedEndIdx; ++idx)
+		{
+			ExistingNestedMappings.Add(Trimmed(NativeSlnFileLines[idx]));
+		}
+
+		TArray<FString> NestedLinesToInsert;
+		for (const FString& ManagedNestedMapping : ManagedNestedMappings)
+		{
+			const FString TrimmedMapping = Trimmed(ManagedNestedMapping);
+			if (!ExistingNestedMappings.Contains(TrimmedMapping))
+			{
+				NestedLinesToInsert.Add(FString::Printf(TEXT("\t\t%s"), *TrimmedMapping));
+				ExistingNestedMappings.Add(TrimmedMapping);
+			}
+		}
+
+		if (!NestedLinesToInsert.IsEmpty())
+		{
+			int32 InsertNestedAt = NativeNestedEndIdx;
+			for (const FString& NestedLine : NestedLinesToInsert)
+			{
+				NativeSlnFileLines.Insert(NestedLine, InsertNestedAt++);
+			}
+		}
 	}
 
 	FString MixedSlnPath = NativeSolutionPath.LeftChop(4) + FString(".Mixed.sln");
@@ -199,13 +436,6 @@ void FUnrealSharpEditorModule::OnOpenDocumentation()
 void FUnrealSharpEditorModule::OnReportBug()
 {
 	FPlatformProcess::LaunchURL(TEXT("https://github.com/UnrealSharp/UnrealSharp/issues"), nullptr, nullptr);
-}
-
-void FUnrealSharpEditorModule::OnRefreshRuntimeGlue()
-{
-	FUnrealSharpRuntimeGlueModule& RuntimeGlueModule = FModuleManager::LoadModuleChecked<FUnrealSharpRuntimeGlueModule>(
-		"UnrealSharpRuntimeGlue");
-	RuntimeGlueModule.ForceRefreshRuntimeGlue();
 }
 
 void FUnrealSharpEditorModule::OnExploreArchiveDirectory(FString ArchiveDirectory)
@@ -239,6 +469,7 @@ void FUnrealSharpEditorModule::PackageProject()
 	TMap<FString, FString> Arguments;
 	Arguments.Add("ArchiveDirectory", FCSUnrealSharpUtils::MakeQuotedPath(ArchiveDirectory));
 	Arguments.Add("BuildConfig", "Release");
+	Arguments.Add("UETargetType", "Game");
 	UCSProcUtilities::InvokeUnrealSharpBuildTool(BUILD_ACTION_PACKAGE_PROJECT, Arguments);
 
 	FNotificationInfo Info(
@@ -278,11 +509,12 @@ void FUnrealSharpEditorModule::OpenSolution()
 	}
 
 	FString ExceptionMessage;
-	if (!ManagedUnrealSharpEditorCallbacks.OpenSolution(*SolutionPath, &ExceptionMessage))
+	if (ManagedUnrealSharpEditorCallbacks.OpenSolution(*SolutionPath, &ExceptionMessage))
 	{
-		FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("Opening C# Project Failed")));
 		return;
 	}
+	
+	FMessageDialog::Open(EAppMsgType::Ok, FText::FromString(ExceptionMessage), FText::FromString(TEXT("Opening C# Project Failed")));
 };
 
 FString FUnrealSharpEditorModule::SelectArchiveDirectory()
@@ -307,7 +539,7 @@ FString FUnrealSharpEditorModule::SelectArchiveDirectory()
 
 TSharedRef<SWidget> FUnrealSharpEditorModule::GenerateUnrealSharpToolbar() const
 {
-	const FCSUnrealSharpEditorCommands& CSCommands = FCSUnrealSharpEditorCommands::Get();
+	const FCSEditorCommands& CSCommands = FCSEditorCommands::Get();
 	FMenuBuilder MenuBuilder(true, UnrealSharpCommands);
 
 	// Build
@@ -356,13 +588,8 @@ TSharedRef<SWidget> FUnrealSharpEditorModule::GenerateUnrealSharpToolbar() const
 	                         FSlateIcon(FAppStyle::Get().GetStyleSetName(), "MainFrame.ReportABug"));
 
 	MenuBuilder.EndSection();
-
-	MenuBuilder.BeginSection("Glue", LOCTEXT("Glue", "Glue"));
-
-	MenuBuilder.AddMenuEntry(CSCommands.RefreshRuntimeGlue, NAME_None, TAttribute<FText>(), TAttribute<FText>(),
-	                         FSlateIcon(FAppStyle::GetAppStyleSetName(), "SourceControl.Actions.Refresh"));
-
-	MenuBuilder.EndSection();
+	
+	OnBuildingToolbar.Broadcast(MenuBuilder);
 
 	return MenuBuilder.MakeWidget();
 }
@@ -395,28 +622,26 @@ void FUnrealSharpEditorModule::SuggestProjectSetup()
 
 void FUnrealSharpEditorModule::RegisterCommands()
 {
-	FCSUnrealSharpEditorCommands::Register();
+	FCSEditorCommands::Register();
 	UnrealSharpCommands = MakeShareable(new FUICommandList);
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().CreateNewProject,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().CreateNewProject,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnCreateNewProject));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().HotReload,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().HotReload,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnCompileManagedCode));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().RegenerateSolution,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().RegenerateSolution,
 	                               FExecuteAction::CreateRaw(this, &FUnrealSharpEditorModule::OnRegenerateSolution));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().OpenSolution,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().OpenSolution,
 	                               FExecuteAction::CreateRaw(this, &FUnrealSharpEditorModule::OnOpenSolution));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().MergeManagedSlnAndNativeSln,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().MergeManagedSlnAndNativeSln,
 								   FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnMergeManagedSlnAndNativeSln));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().PackageProject,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().PackageProject,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnPackageProject));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().OpenSettings,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().OpenSettings,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnOpenSettings));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().OpenDocumentation,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().OpenDocumentation,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnOpenDocumentation));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().ReportBug,
+	UnrealSharpCommands->MapAction(FCSEditorCommands::Get().ReportBug,
 	                               FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnReportBug));
-	UnrealSharpCommands->MapAction(FCSUnrealSharpEditorCommands::Get().RefreshRuntimeGlue,
-							   FExecuteAction::CreateStatic(&FUnrealSharpEditorModule::OnRefreshRuntimeGlue));
 
 	const FLevelEditorModule& LevelEditorModule = FModuleManager::GetModuleChecked<FLevelEditorModule>("LevelEditor");
 	const TSharedRef<FUICommandList> Commands = LevelEditorModule.GetGlobalLevelEditorActions();
@@ -478,6 +703,7 @@ void FUnrealSharpEditorModule::UnregisterPluginTemplates()
 void FUnrealSharpEditorModule::LoadNewProject(const FString& ModuleName, const FString& ModulePath) const
 {
 	UCSProcUtilities::BuildUserSolution();
+	UCSManager::Get().LoadUserAssemblyByName(*ModuleName, true);
 	UCSHotReloadSubsystem::Get()->PauseHotReload(TEXT("Loading new C# project"));
 	ManagedUnrealSharpEditorCallbacks.LoadProject(*ModulePath, &FUnrealSharpEditorModule::OnProjectLoaded);
 }
@@ -491,34 +717,35 @@ void FUnrealSharpEditorModule::OnProjectLoaded()
 	});
 }
 
-void FUnrealSharpEditorModule::AddNewProject(const FString& ModuleName, const FString& ProjectParentFolder, const FString& ProjectRoot, const TMap<FString, FString>& ExtraArguments)
+void FUnrealSharpEditorModule::AddNewProject(const FString& ModuleName, const FString& ProjectParentFolder, const FString& ProjectRoot, TMap<FString, FString> ExtraArguments, bool bOpenProject)
 {
-	TMap<FString, FString> Arguments = ExtraArguments;
-
-	TMap<FString, FString> SolutionArguments;
-	SolutionArguments.Add(TEXT("MODULENAME"), ModuleName);
-
 	FString ProjectFolder = FPaths::Combine(ProjectParentFolder, ModuleName);
-	FString ModuleFilePath = FPaths::Combine(ProjectFolder, ModuleName + ".cs");
+	FString CsProjPath = FPaths::Combine(ProjectFolder, ModuleName + ".csproj");
 	
-	FCSTemplateUtilities::FillTemplateFile(TEXT("Module"), SolutionArguments, ModuleFilePath);
-
-	Arguments.Add(TEXT("NewProjectName"), ModuleName);
-	Arguments.Add(TEXT("NewProjectFolder"), FCSUnrealSharpUtils::MakeQuotedPath(FPaths::ConvertRelativePathToFull(ProjectParentFolder)));
+	if (FPaths::FileExists(CsProjPath))
+	{
+		return;
+	}
+	
+	ExtraArguments.Add(TEXT("NewProjectName"), ModuleName);
+	ExtraArguments.Add(TEXT("NewProjectFolder"), FCSUnrealSharpUtils::MakeQuotedPath(FPaths::ConvertRelativePathToFull(ProjectParentFolder)));
 	
 	FString FullProjectRoot = FPaths::ConvertRelativePathToFull(ProjectRoot);
-	Arguments.Add(TEXT("ProjectRoot"), FCSUnrealSharpUtils::MakeQuotedPath(FullProjectRoot));
+	ExtraArguments.Add(TEXT("ProjectRoot"), FCSUnrealSharpUtils::MakeQuotedPath(FullProjectRoot));
 
-	if (!UCSProcUtilities::InvokeUnrealSharpBuildTool(BUILD_ACTION_GENERATE_PROJECT, Arguments))
+	if (!UCSProcUtilities::InvokeUnrealSharpBuildTool(BUILD_ACTION_GENERATE_PROJECT, ExtraArguments))
 	{
 		UE_LOGFMT(LogUnrealSharpEditor, Error, "Failed to generate project %s in %s", *ModuleName, *ProjectParentFolder);
 		return;
 	}
 	
-	OpenSolution();
+	if (!bOpenProject)
+	{
+		return;
+	}
 	
-	FString ModulePath = FPaths::Combine(ProjectFolder, ModuleName + TEXT(".csproj"));
-	LoadNewProject(ModuleName, ModulePath);
+	LoadNewProject(ModuleName, CsProjPath);
+	OpenSolution();
 }
 
 #undef LOCTEXT_NAMESPACE
