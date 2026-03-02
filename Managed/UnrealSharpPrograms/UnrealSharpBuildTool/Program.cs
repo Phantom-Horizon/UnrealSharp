@@ -1,6 +1,7 @@
-﻿using CommandLine;
+using CommandLine;
 using Newtonsoft.Json;
 using UnrealSharpBuildTool.Actions;
+using System.Xml;
 
 namespace UnrealSharpBuildTool;
 
@@ -205,7 +206,7 @@ public static class Program
             CommandLineArgs = $"\"{commandLineArgs}\"",
         };
 
-        string newJsonString = JsonConvert.SerializeObject(root, Formatting.Indented);
+        string newJsonString = JsonConvert.SerializeObject(root, Newtonsoft.Json.Formatting.Indented);
         StreamWriter writer = File.CreateText(launchSettingsPath);
         writer.Write(newJsonString);
         writer.Close();
@@ -255,7 +256,34 @@ public static class Program
     {
         IEnumerable<FileInfo> csprojFiles = folder.EnumerateFiles("*.csproj", SearchOption.AllDirectories);
         IEnumerable<FileInfo> fsprojFiles = folder.EnumerateFiles("*.fsproj", SearchOption.AllDirectories);
-        return csprojFiles.Concat(fsprojFiles);
+        return csprojFiles.Where(project => !ShouldIgnoreProject(project)).Concat(fsprojFiles);
+    }
+
+    private static bool ShouldIgnoreProject(FileInfo projectFile)
+    {
+        try
+        {
+            XmlDocument doc = new XmlDocument();
+            doc.Load(projectFile.FullName);
+
+            XmlNode? ignoreNode = doc.SelectSingleNode("//UnrealSharpIgnore");
+            if (ignoreNode != null && bool.TryParse(ignoreNode.InnerText, out bool ignore) && ignore)
+            {
+                return true;
+            }
+
+            XmlNode? roslynNode = doc.SelectSingleNode("//IsRoslynComponent");
+            if (roslynNode != null && bool.TryParse(roslynNode.InnerText, out bool isRoslyn) && isRoslyn)
+            {
+                return true;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
     }
     
     public static void CopyGlobalJson()
