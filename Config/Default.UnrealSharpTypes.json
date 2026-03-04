@@ -115,6 +115,14 @@
             {
                 "Name": "FKey",
                 "HasDestructor": false
+            },
+            {
+                "Name": "FBlueprintSessionResult",
+                "HasDestructor": false
+            },
+            {
+                "Name": "FSessionPropertyKeyPair",
+                "HasDestructor": false
             }
         ]
     }
