@@ -1,10 +1,15 @@
 ﻿#include "CSProcUtilities.h"
+
+#include "CSCommonUnrealSharpSettings.h"
+#include "CSUnrealSharpProcHelperSettings.h"
+#include "CSUnrealSharpSettingsUtilities.h"
 #include "UnrealSharpProcHelper.h"
 #include "Misc/App.h"
 #include "Misc/Paths.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/MessageDialog.h"
 #include "Logging/StructuredLog.h"
+#include "Misc/ConfigCacheIni.h"
 
 bool UCSProcUtilities::InvokeCommand(const FString& ProgramPath, const FString& Arguments, int32& OutReturnCode, FString& Output, const FString* InWorkingDirectory)
 {
@@ -140,6 +145,13 @@ bool UCSProcUtilities::BuildUserSolution()
 {
 	TMap<FString, FString> Arguments;
 	Arguments.Add("OutputPath", GetUserAssemblyDirectory());
+	
+	bool bShowBuildWarnings = GetDefault<UCSUnrealSharpProcHelperSettings>()->bShowBuildWarnings;
+	if (!bShowBuildWarnings)
+	{
+		Arguments.Add("clp", "ErrorsOnly");
+	}
+
 	return InvokeUnrealSharpBuildTool(BUILD_ACTION_BUILD_EMIT_LOAD_ORDER, Arguments);
 }
 
@@ -232,7 +244,7 @@ void UCSProcUtilities::GetAllProjectPaths(TArray<FString>& ProjectPaths, bool bI
 	
     for (const FString& PluginFilePath : PluginFilePaths)
     {
-        FString ScriptDirectory = FPaths::GetPath(PluginFilePath) / "Script";
+        FString ScriptDirectory = FPaths::GetPath(PluginFilePath) / FCSCommonUnrealSharpSettings::GetScriptDirectoryName();
         IFileManager::Get().FindFilesRecursive(ProjectPaths,
             *ScriptDirectory,
             TEXT("*.csproj"),
@@ -254,7 +266,7 @@ void UCSProcUtilities::GetAllProjectPaths(TArray<FString>& ProjectPaths, bool bI
 
 FString UCSProcUtilities::GetUnrealSharpBuildToolPath()
 {
-#if PLATFORM_WINDOWS
+#if PLATFORM_WINDOWS || PLATFORM_MAC
 	return FPaths::ConvertRelativePathToFull(GetPluginAssembliesPath() / "UnrealSharpBuildTool.dll");
 #else
 	return FPaths::ConvertRelativePathToFull(GetPluginAssembliesPath() / "UnrealSharpBuildTool");
@@ -327,13 +339,13 @@ FString UCSProcUtilities::GetGeneratedClassesDirectory()
 
 const FString& UCSProcUtilities::GetScriptFolderDirectory()
 {
-	static FString ScriptFolderDirectory = FPaths::ProjectDir() / "Script";
+	static FString ScriptFolderDirectory = FPaths::Combine(FPaths::ProjectDir(), FCSCommonUnrealSharpSettings::GetScriptDirectoryName());
 	return ScriptFolderDirectory;
 }
 
 const FString& UCSProcUtilities::GetPluginsDirectory()
 {
-    static FString PluginsDirectory = FPaths::ProjectDir() / "Plugins";
+    static FString PluginsDirectory = FPaths::Combine(FPaths::ProjectDir(), "Plugins");
     return PluginsDirectory;
 }
 
@@ -354,7 +366,7 @@ FString UCSProcUtilities::GetPluginGlueFolderPath(const FString& PluginName)
 		return "";
 	}
 	
-	return FPaths::Combine(Plugin->GetBaseDir(), "Script", AppendGlueSuffix(PluginName));
+	return FPaths::Combine(Plugin->GetBaseDir(), FCSCommonUnrealSharpSettings::GetScriptDirectoryName(), AppendGlueSuffix(PluginName));
 }
 
 FString UCSProcUtilities::AppendGlueSuffix(const FString& FileName)
